@@ -46,6 +46,13 @@ class VoiceService(object):
         self._ble_backend = None
         self._stt_provider = None
         self._mic_button = None
+        self._ble_control_char_path = None
+        # ATT value handles matched in btmon output; discovered per remote in
+        # _start_ble_monitor, seeded with the UR02 defaults as a fallback.
+        from lib.audio_capture.ble import ATT_HANDLE_STATUS, ATT_HANDLE_AUDIO
+
+        self._status_handle = ATT_HANDLE_STATUS
+        self._audio_handle = ATT_HANDLE_AUDIO
 
     def _get_state(self):
         with self._lock:
@@ -313,45 +320,52 @@ class VoiceService(object):
         try:
             from lib.audio_capture.ble import (
                 BLEAudioCapture,
-                _find_char_path,
+                discover_voice_endpoints,
                 _start_notify,
-                VOICE_STATUS_UUID,
-                VOICE_DATA_UUID,
-                VOICE_CONTROL_UUID,
+                _send_get_caps,
             )
 
-            self._ble_backend = BLEAudioCapture()
-            self._stt_provider = get_stt_provider()
-
-            # Find and enable notifications on status char (mic button)
-            status_path = _find_char_path(VOICE_STATUS_UUID)
-            if status_path is None:
+            # Optionally bind a specific remote by MAC when more than one
+            # ATVV remote is paired (e.g. UR02 vs SHIELD). Blank = auto-pick
+            # the first remote exposing the voice service.
+            addr = (xbmcaddon.Addon().getSetting("voice_device_address") or "").strip()
+            endpoints = discover_voice_endpoints(addr or None)
+            if endpoints is None:
                 xbmc.log(
-                    "Voice keyboard BLE: no status characteristic found",
+                    "Voice keyboard BLE: no ATVV voice remote found "
+                    "(is the remote connected?)",
                     xbmc.LOGWARNING,
                 )
                 return False
-            _start_notify(status_path)
 
-            # Find and enable notifications on audio data char
-            audio_path = _find_char_path(VOICE_DATA_UUID)
-            if audio_path:
-                _start_notify(audio_path)
+            # Handles are per-device; the btmon reader matches against these
+            # instead of hardcoded UR02 handles.
+            self._status_handle = endpoints["status_handle"]
+            self._audio_handle = endpoints["audio_handle"]
+            self._ble_control_char_path = endpoints["control_path"]
+            self._stt_provider = get_stt_provider()
+            self._ble_backend = BLEAudioCapture(
+                audio_handle=endpoints["audio_handle"]
+            )
+            xbmc.log(
+                "Voice keyboard BLE: bound {} (status={}, audio={})".format(
+                    endpoints["device"],
+                    endpoints["status_handle"],
+                    endpoints["audio_handle"],
+                ),
+                xbmc.LOGINFO,
+            )
 
-            # Find control char and pre-enable voice mode.
-            # Writing 0x01 at startup tells the remote the host is ready
-            # for voice data, so it enters voice mode immediately on button
-            # press instead of doing a quick press/release cycle.
-            control_path = _find_char_path(VOICE_CONTROL_UUID)
-            self._ble_control_char_path = control_path
-            if control_path:
-                from lib.audio_capture.ble import _send_get_caps
+            # Enable notifications on status (mic button) and audio chars.
+            _start_notify(endpoints["status_path"])
+            _start_notify(endpoints["audio_path"])
 
-                _send_get_caps(control_path)
-                xbmc.log(
-                    "Voice keyboard BLE: sent ATVV GET_CAPS handshake",
-                    xbmc.LOGINFO,
-                )
+            # ATVV handshake — some firmwares require GET_CAPS before they
+            # honor MIC_OPEN; harmless on those that don't.
+            _send_get_caps(endpoints["control_path"])
+            xbmc.log(
+                "Voice keyboard BLE: sent ATVV GET_CAPS handshake", xbmc.LOGINFO
+            )
 
             xbmc.log(
                 "Voice keyboard BLE: monitoring for mic button press", xbmc.LOGINFO
@@ -419,9 +433,11 @@ class VoiceService(object):
                 continue
             line = raw.decode("utf-8", errors="replace").rstrip()
 
+            status_match = "Handle: " + self._status_handle in prev_line
+
             # Voice button (ATVV): Data[1]: 08 = START_SEARCH; clone
             # firmwares (UR02) retry with ff while waiting for MIC_OPEN.
-            if "Handle: 0x0042" in prev_line and (
+            if status_match and (
                 "Data[1]: ff" in line or "Data[1]: 08" in line
             ):
                 if _KODI_AVAILABLE:
@@ -437,14 +453,14 @@ class VoiceService(object):
             # - held >=2s: releasing the button is the stop signal
             # The remote's own end-of-stream 0x00 also arrives well past 2s,
             # so it stops the capture through the same path.
-            elif "Handle: 0x0042" in prev_line and "Data[1]: 00" in line:
+            elif status_match and "Data[1]: 00" in line:
                 backend = self._ble_backend
                 if backend is not None and getattr(backend, "_recording", False):
                     if time.time() - self._last_activation_time >= 2.0:
                         backend.signal_stream_end()
 
-            # Audio data: Handle 0x003f, Data[N]: hex
-            elif "Handle: 0x003f" in prev_line:
+            # Audio data: audio value handle, Data[N]: hex
+            elif "Handle: " + self._audio_handle in prev_line:
                 m = data_re.search(line)
                 if m:
                     # If audio data arrives while idle, auto-trigger voice start.

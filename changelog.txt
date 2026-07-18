@@ -1,3 +1,10 @@
+v3.0.1-beta.4 (2026-07-18) — UNTESTED, for SHIELD-remote testing
+- Discover ATVV characteristic handles per remote instead of hardcoding
+  the UR02's, so other ATVV remotes (e.g. NVIDIA SHIELD) can work
+- New setting: Voice remote MAC (blank = auto-detect the first remote
+  exposing the voice service) — use it when multiple remotes are paired
+- No behavior change for the UR02 (discovery yields its known handles)
+
 v3.0.1-beta.3 (2026-07-18)
 - Tap mic to start, tap again to stop (remote-native toggle); silence
   detection (1.5s) stops automatically if you just stop talking
