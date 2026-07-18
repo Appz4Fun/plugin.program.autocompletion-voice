@@ -1,0 +1,6 @@
+v2.2.0 (2026-03-30)
+- Voice input for virtual keyboard (press voice button, speak title, autocomplete fills)
+- Gemini Cloud STT with automatic title normalization (free tier, zero setup)
+- Optional local Whisper STT (offline, opt-in)
+- Rate limiting for Gemini free tier (15 RPM, 1000 RPD)
+- USB Bluetooth dongle mic support for CoreELEC
