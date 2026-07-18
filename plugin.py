@@ -12,6 +12,9 @@ import json
 import sys
 from urllib.parse import parse_qsl
 
+# Puts lib/vendor on sys.path; AutoCompletion is vendored there (ADR-005 —
+# the script.module.autocompletion addon is no longer a dependency).
+import lib.vendor  # noqa: F401
 import AutoCompletion
 
 ADDON = xbmcaddon.Addon()

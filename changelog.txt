@@ -1,3 +1,11 @@
+v3.0.1-beta.2 (2026-07-18)
+- Fix ModuleNotFoundError on keyboard popup: vendor the AutoCompletion
+  module (v3.0.0 dropped the script.module.autocompletion dependency but
+  never vendored its module in)
+- AutoCompletion adapted for vendoring: plugin-relative paths, stdlib
+  urllib instead of requests (zero third-party deps)
+- Ship common_{de,en,fr,nl}.txt wordlists for the local dict provider
+
 v3.0.1-beta.1 (2026-07-18)
 - First release through the Appz4Fun Kodi repository (beta channel)
 - Release CI: tag-driven zip build + GitHub release + repo dispatch
