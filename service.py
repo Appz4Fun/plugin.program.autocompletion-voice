@@ -357,15 +357,30 @@ class VoiceService(object):
             )
 
             # Enable notifications on status (mic button) and audio chars.
-            _start_notify(endpoints["status_path"])
-            _start_notify(endpoints["audio_path"])
+            # If either fails, don't claim success — returning False keeps the
+            # caller's retry loop alive instead of silently going deaf.
+            status_ready = _start_notify(endpoints["status_path"])
+            audio_ready = _start_notify(endpoints["audio_path"])
+            if not (status_ready and audio_ready):
+                xbmc.log(
+                    "Voice keyboard BLE: failed to enable notifications "
+                    "(status={}, audio={})".format(status_ready, audio_ready),
+                    xbmc.LOGWARNING,
+                )
+                return False
 
             # ATVV handshake — some firmwares require GET_CAPS before they
-            # honor MIC_OPEN; harmless on those that don't.
-            _send_get_caps(endpoints["control_path"])
-            xbmc.log(
-                "Voice keyboard BLE: sent ATVV GET_CAPS handshake", xbmc.LOGINFO
-            )
+            # honor MIC_OPEN; harmless on those that don't, so a failure here
+            # is only a warning and does not abort monitoring.
+            if _send_get_caps(endpoints["control_path"]):
+                xbmc.log(
+                    "Voice keyboard BLE: sent ATVV GET_CAPS handshake", xbmc.LOGINFO
+                )
+            else:
+                xbmc.log(
+                    "Voice keyboard BLE: GET_CAPS handshake failed (continuing)",
+                    xbmc.LOGWARNING,
+                )
 
             xbmc.log(
                 "Voice keyboard BLE: monitoring for mic button press", xbmc.LOGINFO
@@ -411,13 +426,23 @@ class VoiceService(object):
     def _btmon_reader(self):
         """Read btmon output, detect mic button and capture audio data.
 
-        Unified reader for the single shared btmon process. Handles:
-        - Handle 0x0042 + Data[1]: ff → mic button press → _on_ble_voice_start()
-        - Handle 0x003f + Data[N]: hex → audio data → BLE backend feed
+        Unified reader for the single shared btmon process. Matches the
+        per-remote value handles discovered in _start_ble_monitor:
+        - status handle + Data[1]: 08/ff → mic button press
+        - status handle + Data[1]: 00    → AUDIO_END / release
+        - audio handle  + Data[N]: hex   → audio data → BLE backend feed
 
-        Also auto-triggers voice start when audio data appears on 0x003f
-        while idle — this catches cases where the status notification (0x0042)
+        Also auto-triggers voice start when audio data appears on the audio
+        handle while idle — this catches cases where the status notification
         was too brief for btmon to capture.
+
+        Known limitation: matching is by ATT value handle only. ATT handles
+        are unique only within one peripheral's GATT database, so two paired
+        remotes of the SAME model (identical handles) could cross-trip this
+        reader even when voice_device_address binds one of them. Remotes of
+        different models (e.g. UR02 vs SHIELD) use different handles and are
+        unaffected. Full fix needs correlating each btmon packet to its ACL
+        connection/device; deferred until it can be tested with two remotes.
         """
         import re
         import select as _select

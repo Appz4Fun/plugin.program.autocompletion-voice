@@ -91,8 +91,14 @@ def _scan_chars(device_address=None):
             if "/char" not in path or "/desc" in path:
                 continue
             if device_address:
-                addr_part = device_address.replace(":", "_").upper()
-                if addr_part not in path.upper():
+                # Match the exact /dev_<MAC>/ path component so a partial or
+                # ambiguous MAC can't bind an unintended remote. Uppercase the
+                # whole component (incl. the "dev_" literal) to compare against
+                # path.upper() — otherwise the lowercase literal never matches.
+                device_component = "/dev_{}/".format(
+                    device_address.replace(":", "_")
+                ).upper()
+                if device_component not in path.upper():
                     continue
             prop = subprocess.run(
                 ["busctl", "get-property", "org.bluez", path,
@@ -181,9 +187,15 @@ def discover_voice_endpoints(device_address=None):
 
 def _start_notify(char_path):
     # type: (str) -> bool
-    """Call StartNotify on a GATT characteristic via dbus-send."""
+    """Call StartNotify on a GATT characteristic via dbus-send.
+
+    Returns True only if notifications are actually enabled. A nonzero
+    dbus-send exit means the call failed — except the benign case where the
+    characteristic is already notifying (BlueZ reports InProgress / "Already
+    notifying"), which is treated as success.
+    """
     try:
-        subprocess.run(
+        proc = subprocess.run(
             [
                 "dbus-send",
                 "--system",
@@ -193,10 +205,14 @@ def _start_notify(char_path):
                 "org.bluez.GattCharacteristic1.StartNotify",
             ],
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
             timeout=5,
         )
-        return True
+        if proc.returncode == 0:
+            return True
+        err = (proc.stderr or b"").decode("utf-8", "replace").lower()
+        # Already-subscribed is fine — notifications are on regardless.
+        return "notifying" in err or "inprogress" in err
     except Exception:
         return False
 
