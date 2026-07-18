@@ -1,3 +1,16 @@
+v3.0.1-beta.3 (2026-07-18)
+- Voice actually works end-to-end on ATVV remotes (UR02, SHIELD family)
+- Speak the real ATVV protocol: GET_CAPS handshake at startup, MIC_OPEN
+  (ADPCM 8kHz) on button press, START_SEARCH (0x08) recognized,
+  AUDIO_END (0x00) stops capture
+- Reassemble 128-byte audio frames and seed the ADPCM decoder from each
+  frame header (predictor + step index) — fixes robotic/garbled audio,
+  which also un-breaks silence detection and STT accuracy
+- BLE characteristic discovery via busctl (Kodi's Python has no dbus
+  module on CoreELEC)
+- Log STT transcription results; keep last capture as WAV + raw payload
+  dump in temp for diagnostics
+
 v3.0.1-beta.2 (2026-07-18)
 - Fix ModuleNotFoundError on keyboard popup: vendor the AutoCompletion
   module (v3.0.0 dropped the script.module.autocompletion dependency but

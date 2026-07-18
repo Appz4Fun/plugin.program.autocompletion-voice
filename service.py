@@ -131,6 +131,16 @@ class VoiceService(object):
                 if hasattr(backend, "wait_for_silence"):
                     backend.wait_for_silence()
                 wav_bytes = backend.stop_recording()
+                # Debug aid: keep the last capture on disk so audio-quality
+                # problems can be inspected (this is what STT actually gets).
+                if wav_bytes:
+                    try:
+                        with open(
+                            "/storage/.kodi/temp/voice_last.wav", "wb"
+                        ) as dump:
+                            dump.write(wav_bytes)
+                    except OSError:
+                        pass
             except Exception as exc:
                 xbmc.log(
                     "Voice keyboard microphone error: {}".format(exc), xbmc.LOGWARNING
@@ -175,6 +185,12 @@ class VoiceService(object):
             if provider_name == "gemini":
                 self._rate_limiter.record_call()
 
+            xbmc.log(
+                "Voice keyboard STT heard: {!r} (candidates: {})".format(
+                    candidates[0] if candidates else "", candidates
+                ),
+                xbmc.LOGINFO,
+            )
             if len(candidates) <= 1:
                 result = candidates[0] if candidates else ""
             else:
@@ -183,6 +199,9 @@ class VoiceService(object):
                     return  # user cancelled
                 result = candidates[idx]
 
+            xbmc.log(
+                "Voice keyboard: injecting text {!r}".format(result), xbmc.LOGINFO
+            )
             self._inject_text(result)
         except Exception as exc:
             xbmc.log("Voice keyboard worker error: {}".format(exc), xbmc.LOGWARNING)
@@ -300,11 +319,11 @@ class VoiceService(object):
             control_path = _find_char_path(VOICE_CONTROL_UUID)
             self._ble_control_char_path = control_path
             if control_path:
-                from lib.audio_capture.ble import _send_voice_ack
+                from lib.audio_capture.ble import _send_get_caps
 
-                _send_voice_ack(control_path)
+                _send_get_caps(control_path)
                 xbmc.log(
-                    "Voice keyboard BLE: pre-enabled voice mode on control char",
+                    "Voice keyboard BLE: sent ATVV GET_CAPS handshake",
                     xbmc.LOGINFO,
                 )
 
@@ -374,14 +393,23 @@ class VoiceService(object):
                 continue
             line = raw.decode("utf-8", errors="replace").rstrip()
 
-            # Mic button: Handle 0x0042, Data[1]: ff
-            if "Handle: 0x0042" in prev_line and "Data[1]: ff" in line:
+            # Voice button (ATVV): Data[1]: 08 = START_SEARCH; clone
+            # firmwares (UR02) retry with ff while waiting for MIC_OPEN.
+            if "Handle: 0x0042" in prev_line and (
+                "Data[1]: ff" in line or "Data[1]: 08" in line
+            ):
                 if _KODI_AVAILABLE:
                     xbmc.log(
                         "Voice keyboard BLE: mic button detected via btmon",
                         xbmc.LOGINFO,
                     )
                 self._on_ble_voice_start()
+
+            # ATVV AUDIO_END: remote finished streaming this utterance.
+            elif "Handle: 0x0042" in prev_line and "Data[1]: 00" in line:
+                backend = self._ble_backend
+                if backend is not None and getattr(backend, "_recording", False):
+                    backend.signal_stream_end()
 
             # Audio data: Handle 0x003f, Data[N]: hex
             elif "Handle: 0x003f" in prev_line:
