@@ -1,0 +1,96 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+
+      # No test suite yet — at minimum make sure every module byte-compiles
+      # so an obvious syntax error can't ship as a release.
+      - name: Sanity-check Python sources
+        run: python3 -m compileall -q default.py plugin.py service.py lib
+
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify addon.xml version matches tag
+        env:
+          TAG_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          xml_version=$(python3 -c "
+          import xml.etree.ElementTree as ET
+          tree = ET.parse('addon.xml')
+          print(tree.getroot().get('version'))
+          ")
+          if [ "$xml_version" != "$TAG_VERSION" ]; then
+            echo "ERROR: addon.xml version ($xml_version) does not match tag ($TAG_VERSION)"
+            exit 1
+          fi
+
+      - name: Build addon zip
+        run: python3 scripts/build_zip.py
+
+      # Created as a draft first: GitHub's immutable-releases policy makes a
+      # release read-only for new asset uploads the instant it's published, but
+      # softprops/action-gh-release creates-then-uploads as two separate calls.
+      # Publishing directly races that window and can leave a permanently
+      # asset-less release behind (worse: the tag name is then permanently
+      # unusable for any future release, published or not). Drafts stay
+      # mutable regardless of that policy, so the asset upload always lands
+      # before the "Publish release" step below flips it to published.
+      - name: Create GitHub Release (draft)
+        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v2
+        with:
+          files: plugin.program.autocompletion-${{ steps.version.outputs.version }}.zip
+          generate_release_notes: true
+          draft: true
+          # Semver prerelease tags (e.g. v3.0.1-beta.1) carry a hyphen after the
+          # version. Flag those as pre-release so the Appz4Fun Kodi repository,
+          # which splits Stable vs Beta by the GitHub pre-release checkbox, routes
+          # beta builds to the Beta channel instead of publishing them to Stable.
+          prerelease: ${{ contains(github.ref_name, '-') }}
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_REPO: ${{ github.repository }}
+        run: gh release edit "$RELEASE_TAG" --draft=false --repo "$RELEASE_REPO"
+
+      # Ping the Appz4Fun Kodi repository so it rebuilds within seconds instead
+      # of waiting for its daily schedule. Needs a fine-grained PAT with
+      # Contents: read+write on Appz4Fun/Appz4Fun-Kodi-Repo, stored here as the
+      # secret REPO_DISPATCH_TOKEN. Best-effort: never fails the release.
+      - name: Notify Appz4Fun Kodi repository
+        continue-on-error: true
+        env:
+          DISPATCH_TOKEN: ${{ secrets.REPO_DISPATCH_TOKEN }}
+        run: |
+          if [ -z "$DISPATCH_TOKEN" ]; then
+            echo "REPO_DISPATCH_TOKEN not set; skipping (Kodi repo still rebuilds on its daily schedule)."
+            exit 0
+          fi
+          curl -sS -f -X POST \
+            -H "Authorization: Bearer $DISPATCH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/Appz4Fun/Appz4Fun-Kodi-Repo/dispatches \
+            -d '{"event_type":"addon-released"}' \
+            && echo "Triggered Appz4Fun-Kodi-Repo rebuild."

@@ -1,3 +1,12 @@
+v3.0.1-beta.1 (2026-07-18)
+- First release through the Appz4Fun Kodi repository (beta channel)
+- Release CI: tag-driven zip build + GitHub release + repo dispatch
+
+v3.0.0 (2026-03-31)
+- Kodi settings format v2 migration (boolean types, constraints, edit controls)
+- Dropped script.module.autocompletion dependency; renamed addon
+- BLE remote mic capture (Bluetrum remotes: Ugoos UR-02, G20S) via btmon HCI
+
 v2.2.0 (2026-03-30)
 - Voice input for virtual keyboard (press voice button, speak title, autocomplete fills)
 - Gemini Cloud STT with automatic title normalization (free tier, zero setup)
