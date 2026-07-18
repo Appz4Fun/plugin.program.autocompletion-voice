@@ -65,27 +65,44 @@ _DATA_RE = re.compile(r"Data\[(\d+)\]:\s*([0-9a-fA-F]+)")
 
 def _find_char_path(uuid, device_address=None):
     # type: (str, Optional[str]) -> Optional[str]
-    """Find the D-Bus object path for a GATT characteristic by UUID."""
-    try:
-        import dbus  # type: ignore[import]
-        from dbus.mainloop.glib import DBusGMainLoop  # type: ignore[import]
+    """Find the D-Bus object path for a GATT characteristic by UUID.
 
-        DBusGMainLoop(set_as_default=True)
-        bus = dbus.SystemBus()
-        manager = dbus.Interface(
-            bus.get_object("org.bluez", "/"),
-            "org.freedesktop.DBus.ObjectManager",
+    Uses busctl subprocess calls: Kodi's bundled Python has no dbus module
+    on CoreELEC/LibreELEC, and an in-process GLib main loop would be blocked
+    by Kodi anyway (same reason audio capture goes through btmon).
+    """
+    try:
+        tree = subprocess.run(
+            ["busctl", "tree", "org.bluez", "--list"],
+            capture_output=True,
+            timeout=10,
         )
-        for path, interfaces in manager.GetManagedObjects().items():
-            char_iface = interfaces.get("org.bluez.GattCharacteristic1")
-            if char_iface and str(char_iface.get("UUID", "")) == uuid:
-                if device_address:
-                    addr_part = device_address.replace(":", "_")
-                    if addr_part not in path:
-                        continue
-                return str(path)
-    except Exception:
-        pass
+        for line in tree.stdout.decode("utf-8", "replace").splitlines():
+            path = line.strip()
+            # GATT characteristics live at .../dev_XX/serviceNNNN/charNNNN;
+            # skip descriptor paths (charNNNN/descNNNN) below them.
+            if "/char" not in path or "/desc" in path:
+                continue
+            if device_address:
+                addr_part = device_address.replace(":", "_").upper()
+                if addr_part not in path:
+                    continue
+            prop = subprocess.run(
+                ["busctl", "get-property", "org.bluez", path,
+                 "org.bluez.GattCharacteristic1", "UUID"],
+                capture_output=True,
+                timeout=10,
+            )
+            # Output shape: s "ab5e0004-5a21-4f05-bc7d-af01f617b664"
+            out = prop.stdout.decode("utf-8", "replace")
+            if '"' in out and out.split('"')[1].lower() == uuid.lower():
+                return path
+    except Exception as exc:
+        if _KODI_AVAILABLE:
+            xbmc.log(
+                "Voice keyboard BLE: busctl characteristic lookup failed: {}".format(exc),
+                xbmc.LOGWARNING,
+            )
     return None
 
 
