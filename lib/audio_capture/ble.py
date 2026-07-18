@@ -139,6 +139,7 @@ def _start_notify(char_path):
 # (Some clone firmwares, incl. UR02, retry with 0xff while waiting for
 # MIC_OPEN — treated the same as START_SEARCH.)
 _MIC_OPEN_BYTES = "array:byte:0x0c,0x00,0x01"
+_MIC_CLOSE_BYTES = "array:byte:0x0d,0x00"
 _GET_CAPS_BYTES = "array:byte:0x0a,0x00,0x04"
 
 
@@ -189,6 +190,16 @@ def _send_get_caps(control_char_path):
     """Send GET_CAPS — the ATVV handshake some firmwares require before
     honoring MIC_OPEN. Safe no-op on firmwares that don't."""
     return _write_control(control_char_path, _GET_CAPS_BYTES, wait=True)
+
+
+def _send_mic_close(control_char_path):
+    # type: (str) -> None
+    """Send MIC_CLOSE — ends the remote's voice session (and its LED).
+
+    Without this the remote keeps its mic session open until its own
+    timeout even though the host stopped capturing.
+    """
+    _write_control(control_char_path, _MIC_CLOSE_BYTES, wait=False)
 
 
 # ---------------------------------------------------------------------------

@@ -1,4 +1,10 @@
 v3.0.1-beta.3 (2026-07-18)
+- Tap mic to start, tap again to stop (remote-native toggle); silence
+  detection (1.5s) stops automatically if you just stop talking
+- Persistent "Listening..." indicator that flips to "Transcribing..."
+  and closes when results arrive — no more silent dead air
+- Send MIC_CLOSE the moment capture ends so the remote's LED turns off
+  immediately; open the mic once per session instead of on every retry
 - Voice actually works end-to-end on ATVV remotes (UR02, SHIELD family)
 - Speak the real ATVV protocol: GET_CAPS handshake at startup, MIC_OPEN
   (ADPCM 8kHz) on button press, START_SEARCH (0x08) recognized,

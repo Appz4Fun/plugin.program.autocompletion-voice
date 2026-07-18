@@ -10,7 +10,7 @@ have in-process access to the raw audio stream, such as the macOS backend.
 import math
 import struct
 
-SILENCE_SECONDS_DEFAULT = 5.0
+SILENCE_SECONDS_DEFAULT = 1.5
 RMS_THRESHOLD_DEFAULT = 500  # out of max 32767; covers typical USB mic noise floor
 
 
