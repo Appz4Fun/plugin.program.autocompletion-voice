@@ -1,21 +1,23 @@
 # -*- coding: utf8 -*-
-"""BLE audio capture backend for Bluetrum-based voice remotes (UR-02, G20S).
+"""BLE audio capture backend for Android TV Voice (ATVV) remotes.
 
-Uses btmon subprocess to capture raw HCI traffic for both mic button detection
-and audio data. This bypasses Kodi's D-Bus/GLib main loop which blocks all
-D-Bus signal dispatch to Python addons.
+The ab5e... service is Google's Android TV Voice Service, implemented by the
+Ugoos UR-02, G20S clones and the NVIDIA SHIELD remote among others. Uses a
+btmon subprocess to capture raw HCI traffic for both mic-button detection and
+audio data, bypassing Kodi's D-Bus/GLib main loop which blocks D-Bus signal
+dispatch to Python addons.
 
-Protocol (reverse-engineered from Ugoos UR-02):
-  - Voice service UUID: ab5e0001-5a21-4f05-bc7d-af01f617b664
-  - Audio data char:    ab5e0003 (ATT handle 0x003f) — IMA ADPCM, 8kHz mono
-  - Status char:        ab5e0004 (ATT handle 0x0042) — mic button signals
-  - Control char:       ab5e0002 (ATT handle 0x003d) — write ack
-  - Frame groups: 1 header (20B, 6B metadata + 14B audio) + 5 cont (20B) + 1 partial (8B)
+Service characteristics (UUID is stable across remotes; ATT handles are NOT,
+so they are discovered per device — see discover_voice_endpoints):
+  - Voice service:  ab5e0001-5a21-4f05-bc7d-af01f617b664
+  - Control char:   ab5e0002 — host writes GET_CAPS / MIC_OPEN / MIC_CLOSE
+  - Audio data char:ab5e0003 — IMA ADPCM notifications, 8kHz mono
+  - Status char:    ab5e0004 — mic button / session signals
 
-Voice activation signals on status handle 0x0042:
-  - Data[1]: ff — mic button pressed
-  - Data[1]: 00 — mic button released
-  - Data[4]: 040301XX — voice session ended
+Status-char signals (host reacts to these in service.py's btmon reader):
+  - Data[1]: 08 — START_SEARCH (voice button pressed; host sends MIC_OPEN)
+  - Data[1]: ff — clone-firmware retry while waiting for MIC_OPEN
+  - Data[1]: 00 — AUDIO_END / button release
 """
 
 import io
@@ -44,9 +46,13 @@ VOICE_CONTROL_UUID = "ab5e0002-5a21-4f05-bc7d-af01f617b664"
 VOICE_DATA_UUID = "ab5e0003-5a21-4f05-bc7d-af01f617b664"
 VOICE_STATUS_UUID = "ab5e0004-5a21-4f05-bc7d-af01f617b664"
 
-# ATT attribute handles (from btmon HCI capture)
-ATT_HANDLE_AUDIO = "003f"  # voice data notifications
-ATT_HANDLE_STATUS = "0042"  # mic button press/release
+# Default ATT value handles, from the UR02 btmon HCI capture. Used only as a
+# fallback when live discovery fails; normally the handles are discovered per
+# device (see discover_voice_endpoints) so other ATVV remotes — e.g. the
+# NVIDIA SHIELD remote — work without hardcoding their handles.
+ATT_HANDLE_AUDIO = "0x003f"  # voice data notifications
+ATT_HANDLE_STATUS = "0x0042"  # mic button press/release
+ATT_HANDLE_CONTROL = "0x003d"  # MIC_OPEN / MIC_CLOSE / GET_CAPS writes
 
 BLE_SAMPLE_RATE = 8000
 BLE_SAMPLE_WIDTH = 2
@@ -63,14 +69,15 @@ _DATA_RE = re.compile(r"Data\[(\d+)\]:\s*([0-9a-fA-F]+)")
 # ---------------------------------------------------------------------------
 
 
-def _find_char_path(uuid, device_address=None):
-    # type: (str, Optional[str]) -> Optional[str]
-    """Find the D-Bus object path for a GATT characteristic by UUID.
+def _scan_chars(device_address=None):
+    # type: (Optional[str]) -> List[tuple]
+    """Return [(char_path, uuid_lower), ...] for every GATT characteristic.
 
     Uses busctl subprocess calls: Kodi's bundled Python has no dbus module
     on CoreELEC/LibreELEC, and an in-process GLib main loop would be blocked
     by Kodi anyway (same reason audio capture goes through btmon).
     """
+    found = []  # type: List[tuple]
     try:
         tree = subprocess.run(
             ["busctl", "tree", "org.bluez", "--list"],
@@ -84,8 +91,14 @@ def _find_char_path(uuid, device_address=None):
             if "/char" not in path or "/desc" in path:
                 continue
             if device_address:
-                addr_part = device_address.replace(":", "_").upper()
-                if addr_part not in path:
+                # Match the exact /dev_<MAC>/ path component so a partial or
+                # ambiguous MAC can't bind an unintended remote. Uppercase the
+                # whole component (incl. the "dev_" literal) to compare against
+                # path.upper() — otherwise the lowercase literal never matches.
+                device_component = "/dev_{}/".format(
+                    device_address.replace(":", "_")
+                ).upper()
+                if device_component not in path.upper():
                     continue
             prop = subprocess.run(
                 ["busctl", "get-property", "org.bluez", path,
@@ -95,22 +108,94 @@ def _find_char_path(uuid, device_address=None):
             )
             # Output shape: s "ab5e0004-5a21-4f05-bc7d-af01f617b664"
             out = prop.stdout.decode("utf-8", "replace")
-            if '"' in out and out.split('"')[1].lower() == uuid.lower():
-                return path
+            if '"' in out:
+                found.append((path, out.split('"')[1].lower()))
     except Exception as exc:
         if _KODI_AVAILABLE:
             xbmc.log(
-                "Voice keyboard BLE: busctl characteristic lookup failed: {}".format(exc),
+                "Voice keyboard BLE: busctl scan failed: {}".format(exc),
                 xbmc.LOGWARNING,
             )
+    return found
+
+
+def _find_char_path(uuid, device_address=None):
+    # type: (str, Optional[str]) -> Optional[str]
+    """Find the D-Bus object path for a GATT characteristic by UUID."""
+    uuid = uuid.lower()
+    for path, u in _scan_chars(device_address):
+        if u == uuid:
+            return path
+    return None
+
+
+def _char_value_handle(char_path):
+    # type: (str) -> Optional[str]
+    """Return the ATT value handle for a characteristic path as '0xNNNN'.
+
+    BlueZ names the object by the characteristic's declaration handle
+    (.../charNNNN); the value handle btmon reports for reads/writes and
+    notifications is the next one (declaration + 1). Verified against the
+    UR02: char0041 -> status notifications on 0x0042, char003e -> audio on
+    0x003f, char003c -> control writes on 0x003d. This +1 convention is the
+    part most worth confirming on a new remote (e.g. the SHIELD).
+    """
+    m = re.search(r"/char([0-9a-fA-F]{1,4})$", char_path)
+    if not m:
+        return None
+    return "0x{:04x}".format(int(m.group(1), 16) + 1)
+
+
+def _device_of(char_path):
+    # type: (str) -> Optional[str]
+    """Return the /org/bluez/hciN/dev_XX prefix a characteristic belongs to."""
+    m = re.search(r"(/org/bluez/hci\d+/dev_[0-9A-Fa-f_]+)", char_path)
+    return m.group(1) if m else None
+
+
+def discover_voice_endpoints(device_address=None):
+    # type: (Optional[str]) -> Optional[dict]
+    """Discover the ATVV voice characteristics on a connected remote.
+
+    Returns a dict of paths + value handles for the control/audio/status
+    characteristics of the first device exposing all three ATVV voice UUIDs,
+    or None if none is found. Pass device_address to bind a specific remote
+    when more than one is paired (e.g. UR02 vs SHIELD). Handles are returned
+    as '0xNNNN' strings ready to match against btmon output.
+    """
+    by_dev = {}  # type: dict
+    for path, uuid in _scan_chars(device_address):
+        dev = _device_of(path)
+        if dev:
+            by_dev.setdefault(dev, {})[uuid] = path
+    control = VOICE_CONTROL_UUID.lower()
+    audio = VOICE_DATA_UUID.lower()
+    status = VOICE_STATUS_UUID.lower()
+    for dev, umap in by_dev.items():
+        if control in umap and audio in umap and status in umap:
+            return {
+                "device": dev,
+                "control_path": umap[control],
+                "control_handle": _char_value_handle(umap[control]),
+                "audio_path": umap[audio],
+                "audio_handle": _char_value_handle(umap[audio]),
+                "status_path": umap[status],
+                "status_handle": _char_value_handle(umap[status]),
+            }
     return None
 
 
 def _start_notify(char_path):
     # type: (str) -> bool
-    """Call StartNotify on a GATT characteristic via dbus-send."""
+    """Call StartNotify on a GATT characteristic via dbus-send.
+
+    Returns True only if notifications are actually enabled. A nonzero
+    dbus-send exit means the call failed — except the benign case where the
+    characteristic is already notifying (BlueZ reports InProgress / "Already
+    notifying"), which is treated as success.
+    """
     try:
-        subprocess.run(
+        proc = subprocess.run(
             [
                 "dbus-send",
                 "--system",
@@ -120,10 +205,14 @@ def _start_notify(char_path):
                 "org.bluez.GattCharacteristic1.StartNotify",
             ],
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
             timeout=5,
         )
-        return True
+        if proc.returncode == 0:
+            return True
+        err = (proc.stderr or b"").decode("utf-8", "replace").lower()
+        # Already-subscribed is fine — notifications are on regardless.
+        return "notifying" in err or "inprogress" in err
     except Exception:
         return False
 
@@ -260,10 +349,12 @@ class BLEAudioCapture(AudioCaptureBase):
     IMA ADPCM to PCM, and returns 8kHz/16-bit/mono WAV.
     """
 
-    def __init__(self, max_duration=MAX_DURATION_DEFAULT, device_address=None):
-        # type: (int, Optional[str]) -> None
+    def __init__(self, max_duration=MAX_DURATION_DEFAULT, device_address=None,
+                 audio_handle=ATT_HANDLE_AUDIO):
+        # type: (int, Optional[str], str) -> None
         self._max_duration = max_duration
         self._device_address = device_address
+        self._audio_handle = audio_handle  # '0xNNNN', matched in btmon output
         self._lock = threading.Lock()
         self._pcm_buffer = []  # type: List[bytes]
         self._framer = BLEPacketFramer()
@@ -348,8 +439,8 @@ class BLEAudioCapture(AudioCaptureBase):
                 continue
             line = raw.decode("utf-8", errors="replace").rstrip()
 
-            # Match: previous line has "Handle: 0x003f", current has "Data[N]: hex"
-            if "Handle: 0x" + ATT_HANDLE_AUDIO in prev_line:
+            # Match: previous line has the audio value handle, current the data
+            if "Handle: " + self._audio_handle in prev_line:
                 m = _DATA_RE.search(line)
                 if m:
                     hex_data = m.group(2)

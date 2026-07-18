@@ -146,6 +146,19 @@
                         <heading>32115</heading>
                     </control>
                 </setting>
+                <setting id="voice_device_address" type="string" label="32116">
+                    <level>0</level>
+                    <default/>
+                    <constraints>
+                        <allowempty>true</allowempty>
+                    </constraints>
+                    <dependencies>
+                        <dependency type="visible" setting="audio_source">ble</dependency>
+                    </dependencies>
+                    <control type="edit" format="string">
+                        <heading>32116</heading>
+                    </control>
+                </setting>
             </group>
         </category>
     </section>

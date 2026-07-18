@@ -102,3 +102,7 @@ msgstr ""
 msgctxt "#32115"
 msgid "Audio source"
 msgstr ""
+
+msgctxt "#32116"
+msgid "Voice remote MAC (blank = auto-detect)"
+msgstr "MAC telecomando vocale (vuoto = auto)"
