@@ -86,6 +86,7 @@ class VoiceService(object):
 
     def _worker(self):
         """Worker thread: capture → transcribe → inject. Always returns state to idle."""
+        progress = None
         try:
             provider_name = xbmcaddon.Addon().getSetting("stt_provider") or "gemini"
 
@@ -106,9 +107,11 @@ class VoiceService(object):
                     )
                     return
 
-            xbmcgui.Dialog().notification(
-                "Voice Input", "Listening...", xbmcgui.NOTIFICATION_INFO, 3000
-            )
+            # Persistent indicator: stays up while listening, flips to
+            # "Transcribing..." after capture, closed in the finally below —
+            # so there is never silent dead air between speech and result.
+            progress = xbmcgui.DialogProgressBG()
+            progress.create("Voice Input", "Listening...")
             backend = self._ble_backend if self._ble_backend else get_audio_backend()
             if backend is None:
                 xbmcgui.Dialog().notification(
@@ -130,7 +133,24 @@ class VoiceService(object):
                 # BLE backend buffers asynchronously; wait for silence or timeout.
                 if hasattr(backend, "wait_for_silence"):
                     backend.wait_for_silence()
+                # Tell the remote the session is over the moment capture ends
+                # (turns its LED off) — before the WAV build, which can take
+                # a second on this hardware. Covers every stop reason.
+                if getattr(self, "_ble_control_char_path", None):
+                    from lib.audio_capture.ble import _send_mic_close
+
+                    _send_mic_close(self._ble_control_char_path)
                 wav_bytes = backend.stop_recording()
+                # Debug aid: keep the last capture on disk so audio-quality
+                # problems can be inspected (this is what STT actually gets).
+                if wav_bytes:
+                    try:
+                        with open(
+                            "/storage/.kodi/temp/voice_last.wav", "wb"
+                        ) as dump:
+                            dump.write(wav_bytes)
+                    except OSError:
+                        pass
             except Exception as exc:
                 xbmc.log(
                     "Voice keyboard microphone error: {}".format(exc), xbmc.LOGWARNING
@@ -153,9 +173,7 @@ class VoiceService(object):
                 return
 
             self._set_state(self._STATE_PROCESSING)
-            xbmcgui.Dialog().notification(
-                "Voice Input", "Processing...", xbmcgui.NOTIFICATION_INFO, 3000
-            )
+            progress.update(75, message="Transcribing...")
             provider = self._stt_provider if self._stt_provider else get_stt_provider()
             try:
                 candidates = provider.transcribe_candidates(wav_bytes)
@@ -175,6 +193,25 @@ class VoiceService(object):
             if provider_name == "gemini":
                 self._rate_limiter.record_call()
 
+            xbmc.log(
+                "Voice keyboard STT heard: {!r} (candidates: {})".format(
+                    candidates[0] if candidates else "", candidates
+                ),
+                xbmc.LOGINFO,
+            )
+            # Close the busy indicator before showing results (or the picker).
+            progress.close()
+            progress = None
+
+            if not any(c.strip() for c in candidates):
+                xbmcgui.Dialog().notification(
+                    "Voice Input",
+                    "Heard nothing usable — try again",
+                    xbmcgui.NOTIFICATION_ERROR,
+                    5000,
+                )
+                return
+
             if len(candidates) <= 1:
                 result = candidates[0] if candidates else ""
             else:
@@ -183,6 +220,9 @@ class VoiceService(object):
                     return  # user cancelled
                 result = candidates[idx]
 
+            xbmc.log(
+                "Voice keyboard: injecting text {!r}".format(result), xbmc.LOGINFO
+            )
             self._inject_text(result)
         except Exception as exc:
             xbmc.log("Voice keyboard worker error: {}".format(exc), xbmc.LOGWARNING)
@@ -193,6 +233,11 @@ class VoiceService(object):
                 5000,
             )
         finally:
+            if progress is not None:
+                try:
+                    progress.close()
+                except Exception:
+                    pass
             self._set_state(self._STATE_IDLE)
 
     def _send_ble_ack(self):
@@ -216,13 +261,11 @@ class VoiceService(object):
         visibility check + worker launch to a new thread where Kodi API
         calls are safe.
 
-        The ack is always sent regardless of debounce/state — the remote
-        needs the ack to keep the voice session alive.
+        MIC_OPEN is only sent when a new session actually starts: every
+        MIC_OPEN resets the remote's ~17s internal mic timer, so re-sending
+        it on the clone firmware's ff retries needlessly extends the
+        session (and how long the remote's LED stays lit).
         """
-        # Always ack the mic press to keep the remote's voice session alive,
-        # even if we're debouncing or already in a voice session.
-        self._send_ble_ack()
-
         now = time.time()
         elapsed = now - self._last_activation_time
         if elapsed < DEBOUNCE_SECONDS:
@@ -230,6 +273,8 @@ class VoiceService(object):
         state = self._get_state()
         if state != self._STATE_IDLE:
             return
+        # Open the remote's mic for this new session.
+        self._send_ble_ack()
         # Set state immediately to prevent double-triggers
         self._set_state(self._STATE_LISTENING)
         self._last_activation_time = now
@@ -300,11 +345,11 @@ class VoiceService(object):
             control_path = _find_char_path(VOICE_CONTROL_UUID)
             self._ble_control_char_path = control_path
             if control_path:
-                from lib.audio_capture.ble import _send_voice_ack
+                from lib.audio_capture.ble import _send_get_caps
 
-                _send_voice_ack(control_path)
+                _send_get_caps(control_path)
                 xbmc.log(
-                    "Voice keyboard BLE: pre-enabled voice mode on control char",
+                    "Voice keyboard BLE: sent ATVV GET_CAPS handshake",
                     xbmc.LOGINFO,
                 )
 
@@ -374,14 +419,29 @@ class VoiceService(object):
                 continue
             line = raw.decode("utf-8", errors="replace").rstrip()
 
-            # Mic button: Handle 0x0042, Data[1]: ff
-            if "Handle: 0x0042" in prev_line and "Data[1]: ff" in line:
+            # Voice button (ATVV): Data[1]: 08 = START_SEARCH; clone
+            # firmwares (UR02) retry with ff while waiting for MIC_OPEN.
+            if "Handle: 0x0042" in prev_line and (
+                "Data[1]: ff" in line or "Data[1]: 08" in line
+            ):
                 if _KODI_AVAILABLE:
                     xbmc.log(
                         "Voice keyboard BLE: mic button detected via btmon",
                         xbmc.LOGINFO,
                     )
                 self._on_ble_voice_start()
+
+            # ATVV AUDIO_END / button release (0x00). Two interaction modes:
+            # - short press (<2s): keep listening until silence is detected
+            #   (ignore the release that immediately follows the press)
+            # - held >=2s: releasing the button is the stop signal
+            # The remote's own end-of-stream 0x00 also arrives well past 2s,
+            # so it stops the capture through the same path.
+            elif "Handle: 0x0042" in prev_line and "Data[1]: 00" in line:
+                backend = self._ble_backend
+                if backend is not None and getattr(backend, "_recording", False):
+                    if time.time() - self._last_activation_time >= 2.0:
+                        backend.signal_stream_end()
 
             # Audio data: Handle 0x003f, Data[N]: hex
             elif "Handle: 0x003f" in prev_line:

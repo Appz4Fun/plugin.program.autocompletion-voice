@@ -128,57 +128,78 @@ def _start_notify(char_path):
         return False
 
 
-def _send_voice_ack(control_char_path):
-    # type: (str) -> bool
-    """Write ack byte 0x01 to the voice control characteristic.
+# The ab5e... service is Google's Android TV Voice Service (ATVV). The host
+# opens the mic by WRITING a command to the control char (ab5e0002); the
+# remote only streams audio after MIC_OPEN. Opcodes (host→remote):
+#   0x0A GET_CAPS, 0x0C MIC_OPEN (param: 0x01 = ADPCM 8kHz/16bit),
+#   0x0D MIC_CLOSE
+# Remote→host on the status char (ab5e0004):
+#   0x08 START_SEARCH (voice button pressed — host must send MIC_OPEN),
+#   0x0B CAPS_RESP, 0x04 AUDIO_START, 0x00 AUDIO_END
+# (Some clone firmwares, incl. UR02, retry with 0xff while waiting for
+# MIC_OPEN — treated the same as START_SEARCH.)
+_MIC_OPEN_BYTES = "array:byte:0x0c,0x00,0x01"
+_MIC_CLOSE_BYTES = "array:byte:0x0d,0x00"
+_GET_CAPS_BYTES = "array:byte:0x0a,0x00,0x04"
 
-    This tells the remote to keep the voice session alive. Without this ack,
-    the remote sends a quick press/release (ff/00) and drops the session.
-    """
+
+def _write_control(control_char_path, value_arg, wait):
+    # type: (str, str, bool) -> bool
+    """Write a command to the voice control characteristic via dbus-send."""
+    cmd = [
+        "dbus-send",
+        "--system",
+        "--type=method_call",
+        "--dest=org.bluez",
+        control_char_path,
+        "org.bluez.GattCharacteristic1.WriteValue",
+        value_arg,
+        "dict:string:variant:",
+    ]
     try:
-        subprocess.run(
-            [
-                "dbus-send",
-                "--system",
-                "--type=method_call",
-                "--dest=org.bluez",
-                control_char_path,
-                "org.bluez.GattCharacteristic1.WriteValue",
-                "array:byte:0x01",
-                "dict:string:variant:",
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=5,
-        )
+        if wait:
+            subprocess.run(
+                cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5
+            )
+        else:
+            subprocess.Popen(
+                cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
         return True
     except Exception:
         return False
 
 
+def _send_voice_ack(control_char_path):
+    # type: (str) -> bool
+    """Send MIC_OPEN (ADPCM 8kHz) — the ATVV command that starts audio."""
+    return _write_control(control_char_path, _MIC_OPEN_BYTES, wait=True)
+
+
 def _send_voice_ack_fast(control_char_path):
     # type: (str) -> None
-    """Fire-and-forget voice ack — Popen without waiting.
+    """Fire-and-forget MIC_OPEN — Popen without waiting.
 
     Used on mic button press where speed matters more than confirmation.
     """
-    try:
-        subprocess.Popen(
-            [
-                "dbus-send",
-                "--system",
-                "--type=method_call",
-                "--dest=org.bluez",
-                control_char_path,
-                "org.bluez.GattCharacteristic1.WriteValue",
-                "array:byte:0x01",
-                "dict:string:variant:",
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    except Exception:
-        pass
+    _write_control(control_char_path, _MIC_OPEN_BYTES, wait=False)
+
+
+def _send_get_caps(control_char_path):
+    # type: (str) -> bool
+    """Send GET_CAPS — the ATVV handshake some firmwares require before
+    honoring MIC_OPEN. Safe no-op on firmwares that don't."""
+    return _write_control(control_char_path, _GET_CAPS_BYTES, wait=True)
+
+
+def _send_mic_close(control_char_path):
+    # type: (str) -> None
+    """Send MIC_CLOSE — ends the remote's voice session (and its LED).
+
+    Without this the remote keeps its mic session open until its own
+    timeout even though the host stopped capturing.
+    """
+    _write_control(control_char_path, _MIC_CLOSE_BYTES, wait=False)
 
 
 # ---------------------------------------------------------------------------
@@ -187,22 +208,44 @@ def _send_voice_ack_fast(control_char_path):
 
 
 class BLEPacketFramer(object):
-    """Strips framing headers from BLE voice GATT notification packets."""
+    """Reassembles ATVV audio frames from GATT notification payloads.
+
+    UR02 frame = 128 bytes over 7 notifications (6x20B + 1x8B): a 6-byte
+    header (seq u16 BE, id u8, predictor s16 BE, step u8) followed by 122
+    bytes of IMA ADPCM. The header state MUST seed the decoder for its
+    frame — the remote's encoder does not run continuously across frames,
+    so decoding the concatenated stream without reseeding produces loud
+    robotic garble (measured RMS 17383 vs 937 on the same capture).
+    """
+
+    MAX_FRAME_BYTES = 256  # resync guard if a terminator packet is lost
 
     def __init__(self):
-        self._next_seq = 0
+        self._buf = b""
 
     def reset(self):
-        self._next_seq = 0
+        self._buf = b""
 
     def process_packet(self, data):
-        # type: (bytes) -> bytes
-        if len(data) == 20:
-            seq = struct.unpack(">H", data[0:2])[0]
-            if seq == self._next_seq:
-                self._next_seq += 1
-                return data[6:]
-        return data
+        # type: (bytes) -> Optional[tuple]
+        """Feed one notification payload.
+
+        Returns (predictor, step_index, adpcm_bytes) once a full frame is
+        assembled (payloads shorter than 20B terminate a frame), else None.
+        """
+        self._buf += data
+        if len(data) >= 20:
+            if len(self._buf) > self.MAX_FRAME_BYTES:
+                self._buf = b""  # lost the terminator — drop and resync
+            return None
+        frame, self._buf = self._buf, b""
+        if len(frame) < 7:
+            return None
+        predictor = struct.unpack(">h", frame[3:5])[0]
+        step_index = frame[5]
+        if step_index > 88:
+            return None  # corrupt header — skip frame
+        return (predictor, step_index, frame[6:])
 
 
 # ---------------------------------------------------------------------------
@@ -277,7 +320,12 @@ class BLEAudioCapture(AudioCaptureBase):
         # type: (bytes) -> None
         if not self._recording:
             return
-        audio_bytes = self._framer.process_packet(bytes(value))
+        frame = self._framer.process_packet(bytes(value))
+        if frame is None:
+            return
+        predictor, step_index, audio_bytes = frame
+        self._decoder.predictor = predictor
+        self._decoder.step_index = step_index
         pcm = self._decoder.decode(audio_bytes)
         with self._lock:
             self._pcm_buffer.append(pcm)
@@ -319,6 +367,16 @@ class BLEAudioCapture(AudioCaptureBase):
             )
         self._stop_event.set()
 
+    def signal_stream_end(self):
+        # type: () -> None
+        """End the capture early — remote sent AUDIO_END on the status char."""
+        if _KODI_AVAILABLE:
+            xbmc.log(
+                "Voice keyboard BLE: AUDIO_END received, stopping capture",
+                xbmc.LOGINFO,
+            )
+        self._stop_event.set()
+
     # ------------------------------------------------------------------
     # AudioCaptureBase interface
     # ------------------------------------------------------------------
@@ -334,6 +392,10 @@ class BLEAudioCapture(AudioCaptureBase):
         self._pcm_buffer = []
         self._framer.reset()
         self._decoder.reset()
+        try:
+            open("/storage/.kodi/temp/voice_raw.hex", "w").close()
+        except OSError:
+            pass
         self._silence_detector = SilenceDetector(sample_rate=BLE_SAMPLE_RATE)
         self._stop_event.clear()
         self._last_packet_time = 0.0
@@ -371,6 +433,14 @@ class BLEAudioCapture(AudioCaptureBase):
         on handle 0x003f.
         """
         try:
+            # Debug aid: keep the raw notification payloads of the last
+            # session so framing/decoder problems can be analyzed offline.
+            if self._recording:
+                try:
+                    with open("/storage/.kodi/temp/voice_raw.hex", "a") as fh:
+                        fh.write(hex_data + "\n")
+                except OSError:
+                    pass
             self._on_voice_data(bytes.fromhex(hex_data))
         except (ValueError, Exception):
             pass
