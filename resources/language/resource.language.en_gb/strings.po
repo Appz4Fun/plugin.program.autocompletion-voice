@@ -102,3 +102,39 @@ msgstr ""
 msgctxt "#32115"
 msgid "Audio source"
 msgstr "Audio source"
+
+msgctxt "#32116"
+msgid "ElevenLabs API key"
+msgstr ""
+
+msgctxt "#32117"
+msgid "ElevenLabs model (blank = scribe_v1)"
+msgstr ""
+
+msgctxt "#32118"
+msgid "Title-matching LLM"
+msgstr ""
+
+msgctxt "#32119"
+msgid "LLM API key"
+msgstr ""
+
+msgctxt "#32120"
+msgid "LLM model (blank = preset default)"
+msgstr ""
+
+msgctxt "#32121"
+msgid "Anthropic API key"
+msgstr ""
+
+msgctxt "#32122"
+msgid "OpenAI API key"
+msgstr ""
+
+msgctxt "#32123"
+msgid "Gemini API key for LLM (blank = use STT Gemini key)"
+msgstr ""
+
+msgctxt "#32124"
+msgid "Voice commands outside search (needs title-matching LLM)"
+msgstr ""

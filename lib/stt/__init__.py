@@ -38,6 +38,11 @@ def get_stt_provider():
 
         return GeminiSTTProvider()
 
+    if provider == "elevenlabs":
+        from lib.stt.elevenlabs import ElevenLabsSTTProvider  # noqa: PLC0415
+
+        return ElevenLabsSTTProvider()
+
     if provider == "whisper":
         try:
             from lib.stt.whisper import WhisperSTTProvider  # noqa: PLC0415

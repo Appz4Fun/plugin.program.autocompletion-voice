@@ -33,16 +33,26 @@ class SilenceDetector(object):
         threshold=RMS_THRESHOLD_DEFAULT,
         silence_seconds=SILENCE_SECONDS_DEFAULT,
         sample_rate=16000,
+        lead_in_seconds=5.0,
     ):
-        # type: (float, float, int) -> None
+        # type: (float, float, int, float) -> None
         self._threshold = threshold
         self._silence_limit = int(silence_seconds * sample_rate)  # samples
+        # Silence only ends the capture AFTER speech has been heard; before
+        # that the user gets up to lead_in_seconds to start talking (people
+        # pause after pressing the button — stopping then sent pure noise
+        # to STT).
+        self._lead_in_limit = int(lead_in_seconds * sample_rate)
         self._silent_frames = 0
+        self._lead_in_frames = 0
+        self._heard_speech = False
 
     def reset(self):
         # type: () -> None
         """Reset the silence counter (call before starting a new recording)."""
         self._silent_frames = 0
+        self._lead_in_frames = 0
+        self._heard_speech = False
 
     def process(self, pcm_chunk):
         # type: (bytes) -> bool
@@ -52,10 +62,14 @@ class SilenceDetector(object):
         """
         rms = self._compute_rms(pcm_chunk)
         num_samples = len(pcm_chunk) // 2  # 2 bytes per 16-bit sample
-        if rms < self._threshold:
-            self._silent_frames += num_samples
-        else:
+        if rms >= self._threshold:
+            self._heard_speech = True
             self._silent_frames = 0
+            return False
+        if not self._heard_speech:
+            self._lead_in_frames += num_samples
+            return self._lead_in_frames >= self._lead_in_limit
+        self._silent_frames += num_samples
         return self._silent_frames >= self._silence_limit
 
     def _compute_rms(self, pcm_chunk):

@@ -95,6 +95,7 @@
                     <constraints>
                         <options>
                             <option>gemini</option>
+                            <option>elevenlabs</option>
                             <option>whisper</option>
                         </options>
                         <allowempty>false</allowempty>
@@ -113,6 +114,115 @@
                     <control type="edit" format="string">
                         <heading>32102</heading>
                     </control>
+                </setting>
+
+                <setting id="elevenlabs_api_key" type="string" label="32116">
+                    <level>0</level>
+                    <default/>
+                    <constraints>
+                        <allowempty>true</allowempty>
+                    </constraints>
+                    <control type="edit" format="string">
+                        <heading>32116</heading>
+                    </control>
+                    <dependencies>
+                        <dependency type="visible" setting="stt_provider">elevenlabs</dependency>
+                    </dependencies>
+                </setting>
+
+                <setting id="elevenlabs_model" type="string" label="32117">
+                    <level>0</level>
+                    <default/>
+                    <constraints>
+                        <allowempty>true</allowempty>
+                    </constraints>
+                    <control type="edit" format="string">
+                        <heading>32117</heading>
+                    </control>
+                    <dependencies>
+                        <dependency type="visible" setting="stt_provider">elevenlabs</dependency>
+                    </dependencies>
+                </setting>
+
+                <setting id="voice_commands" type="boolean" label="32124">
+                    <level>0</level>
+                    <default>true</default>
+                    <control type="toggle" />
+                </setting>
+
+                <setting label="32118" id="llm_provider" type="string" help="">
+                    <level>0</level>
+                    <default>off</default>
+                    <constraints>
+                        <options>
+                            <option>off</option>
+                            <option>anthropic</option>
+                            <option>openai</option>
+                            <option>gemini</option>
+                        </options>
+                        <allowempty>false</allowempty>
+                    </constraints>
+                    <control type="spinner" format="string">
+                        <heading>32118</heading>
+                    </control>
+                </setting>
+
+                <setting id="llm_key_anthropic" type="string" label="32121">
+                    <level>0</level>
+                    <default/>
+                    <constraints>
+                        <allowempty>true</allowempty>
+                    </constraints>
+                    <control type="edit" format="string">
+                        <heading>32121</heading>
+                    </control>
+                    <dependencies>
+                        <dependency type="visible" setting="llm_provider">anthropic</dependency>
+                    </dependencies>
+                </setting>
+
+                <setting id="llm_key_openai" type="string" label="32122">
+                    <level>0</level>
+                    <default/>
+                    <constraints>
+                        <allowempty>true</allowempty>
+                    </constraints>
+                    <control type="edit" format="string">
+                        <heading>32122</heading>
+                    </control>
+                    <dependencies>
+                        <dependency type="visible" setting="llm_provider">openai</dependency>
+                    </dependencies>
+                </setting>
+
+                <setting id="llm_key_gemini" type="string" label="32123">
+                    <level>0</level>
+                    <default/>
+                    <constraints>
+                        <allowempty>true</allowempty>
+                    </constraints>
+                    <control type="edit" format="string">
+                        <heading>32123</heading>
+                    </control>
+                    <dependencies>
+                        <dependency type="visible" setting="llm_provider">gemini</dependency>
+                    </dependencies>
+                </setting>
+
+                <setting id="llm_model" type="string" label="32120">
+                    <level>0</level>
+                    <default/>
+                    <constraints>
+                        <allowempty>true</allowempty>
+                    </constraints>
+                    <control type="edit" format="string">
+                        <heading>32120</heading>
+                    </control>
+                    <dependencies>
+                        <dependency type="visible">
+                            <condition operator="!is" setting="llm_provider">off</condition>
+                        </dependency>
+                    </dependencies>
                 </setting>
 
                 <setting id="voice_enabled" type="boolean" label="32103">

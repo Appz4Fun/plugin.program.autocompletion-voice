@@ -68,12 +68,40 @@ class VoiceService(object):
             return True
         return False
 
+    def _bingie_search_visible(self):
+        """Bingie skin's built-in search window (Custom_1109_BingieSearch).
+
+        It has its own on-screen keyboard that writes to
+        Skin.String(CustomSearchTerm) instead of using the virtual keyboard.
+        """
+        return xbmc.getSkinDir() == "skin.bingie" and bool(
+            xbmc.getCondVisibility("Window.IsVisible(1109)")
+        )
+
+    @staticmethod
+    def _set_bingie_search(text):
+        """Fill Bingie's search box the way its own keys do, and refresh."""
+        safe = text.replace("\\", "").replace('"', "").strip()
+        xbmc.executebuiltin('Skin.SetString(CustomSearchTerm,"{}")'.format(safe))
+        xbmc.executebuiltin("SetProperty(CustomSearch,1,home)")
+
     def _keyboard_visible(self):
-        """Return True if the virtual keyboard is currently on screen."""
-        return bool(xbmc.getCondVisibility("Window.IsVisible(virtualkeyboard)"))
+        """Return True if a supported text-entry screen is on screen."""
+        return bool(
+            xbmc.getCondVisibility("Window.IsVisible(virtualkeyboard)")
+        ) or self._bingie_search_visible()
 
     def _inject_text(self, text):
-        """Inject text via Input.SendText JSON-RPC. done=False keeps keyboard open."""
+        """Inject text into the active keyboard.
+
+        Bingie search: set the skin string its keys write to and trigger its
+        refresh. Otherwise Input.SendText (done=False keeps keyboard open).
+        """
+        if self._bingie_search_visible() and not xbmc.getCondVisibility(
+            "Window.IsVisible(virtualkeyboard)"
+        ):
+            self._set_bingie_search(text)
+            return
         payload = json.dumps(
             {
                 "jsonrpc": "2.0",
@@ -84,8 +112,17 @@ class VoiceService(object):
         )
         xbmc.executeJSONRPC(payload)
 
-    def _worker(self):
-        """Worker thread: capture → transcribe → inject. Always returns state to idle."""
+    def _commands_enabled(self):
+        from lib import title_mapper
+
+        return (
+            xbmcaddon.Addon().getSetting("voice_commands") != "false"
+            and title_mapper.enabled()
+        )
+
+    def _worker(self, mode="dictate"):
+        """Worker thread: capture → transcribe → inject (dictate) or run a
+        voice command (command). Always returns state to idle."""
         progress = None
         try:
             provider_name = xbmcaddon.Addon().getSetting("stt_provider") or "gemini"
@@ -163,6 +200,16 @@ class VoiceService(object):
                 )
                 return
 
+            # Too short to be speech (tap, or released instantly): a header-only
+            # or few-ms WAV makes STT APIs fail with "corrupted audio".
+            if wav_bytes and len(wav_bytes) < 44 + int(16000 * 2 * 0.3):
+                xbmc.log(
+                    "Voice keyboard: capture too short ({} bytes), ignoring".format(
+                        len(wav_bytes)
+                    ),
+                    xbmc.LOGINFO,
+                )
+                wav_bytes = None
             if not wav_bytes:
                 xbmcgui.Dialog().notification(
                     "Voice Input",
@@ -175,8 +222,56 @@ class VoiceService(object):
             self._set_state(self._STATE_PROCESSING)
             progress.update(75, message="Transcribing...")
             provider = self._stt_provider if self._stt_provider else get_stt_provider()
+            from lib import title_mapper
+
+            if mode == "command":
+                from lib import voice_commands
+
+                try:
+                    raw_text = provider.transcribe(wav_bytes)
+                except RuntimeError as exc:
+                    xbmc.log("Voice command STT failed: {}".format(exc), xbmc.LOGWARNING)
+                    xbmcgui.Dialog().notification(
+                        "Voice", "Transcription failed", xbmcgui.NOTIFICATION_ERROR, 4000
+                    )
+                    return
+                if provider_name == "gemini":
+                    self._rate_limiter.record_call()
+                xbmc.log("Voice command heard: {!r}".format(raw_text), xbmc.LOGINFO)
+                if not raw_text.strip():
+                    xbmcgui.Dialog().notification(
+                        "Voice", "Heard nothing usable", xbmcgui.NOTIFICATION_WARNING, 3000
+                    )
+                    return
+                progress.update(90, message='"{}"'.format(raw_text[:60]))
+                plan = voice_commands.interpret(raw_text)
+                progress.close()
+                progress = None
+                if plan is None:
+                    xbmcgui.Dialog().notification(
+                        "Voice", "Command LLM unavailable — check key", xbmcgui.NOTIFICATION_ERROR, 4000
+                    )
+                    return
+                done = voice_commands.execute(plan, self._set_bingie_search)
+                if done and plan.get("say"):
+                    xbmcgui.Dialog().notification(
+                        "Voice", plan["say"], xbmcgui.NOTIFICATION_INFO, 2500
+                    )
+                return
+
+            use_llm = title_mapper.enabled()
             try:
-                candidates = provider.transcribe_candidates(wav_bytes)
+                if use_llm:
+                    # Fast literal transcript, then the LLM maps it to titles
+                    # (skips Gemini's slow 100-line candidate prompt).
+                    raw_text = provider.transcribe(wav_bytes)
+                    xbmc.log(
+                        "Voice keyboard STT raw: {!r}".format(raw_text), xbmc.LOGINFO
+                    )
+                    progress.update(90, message="Matching title...")
+                    candidates = title_mapper.map_titles(raw_text) or [raw_text]
+                else:
+                    candidates = provider.transcribe_candidates(wav_bytes)
             except RuntimeError as exc:
                 xbmc.log(
                     "Voice keyboard transcription failed: {}".format(exc),
@@ -285,12 +380,26 @@ class VoiceService(object):
             )
 
         def _check_and_run():
+            if not self._keyboard_visible() and self._commands_enabled():
+                xbmc.log("Voice keyboard: no text field, command mode", xbmc.LOGINFO)
+                self._worker(mode="command")
+                return
             if not self._keyboard_visible():
                 if _KODI_AVAILABLE:
                     xbmc.log(
                         "Voice keyboard: keyboard not visible, ignoring",
                         xbmc.LOGINFO,
                     )
+                # Close the remote's mic (LED off) and ignore the rest of this
+                # stream instead of re-triggering on every audio packet.
+                self._ignore_audio_until = time.time() + 3.0
+                if getattr(self, "_ble_control_char_path", None):
+                    try:
+                        from lib.audio_capture.ble import _send_mic_close
+
+                        _send_mic_close(self._ble_control_char_path)
+                    except Exception:
+                        pass
                 self._set_state(self._STATE_IDLE)
                 return
             self._worker()
@@ -398,7 +507,8 @@ class VoiceService(object):
         """Read btmon output, detect mic button and capture audio data.
 
         Unified reader for the single shared btmon process. Handles:
-        - Handle 0x0042 + Data[1]: ff → mic button press → _on_ble_voice_start()
+        - Handle 0x0042 + Data[1]: 08/ff → mic button press → _on_ble_voice_start()
+        - Handle 0x0042 + Data[1]: 00 → button released → stop capture (push-to-talk)
         - Handle 0x003f + Data[N]: hex → audio data → BLE backend feed
 
         Also auto-triggers voice start when audio data appears on 0x003f
@@ -406,62 +516,93 @@ class VoiceService(object):
         was too brief for btmon to capture.
         """
         import re
-        import select as _select
 
-        data_re = re.compile(r"Data\[(\d+)\]:\s*([0-9a-fA-F]+)")
-        prev_line = ""
-        while self._btmon_proc and self._btmon_proc.poll() is None:
-            r, _, _ = _select.select([self._btmon_proc.stdout], [], [], 0.05)
-            if not r:
-                continue
-            raw = self._btmon_proc.stdout.readline()
-            if not raw:
-                continue
+        # btmon prints notification payloads two ways depending on version:
+        #   old:  "Data[1]: ff"           (hex on the same line)
+        #   5.8x: "Data[1]:" then hexdump lines "ff    ." (16 bytes/line)
+        data_re = re.compile(r"Data\[(\d+)\]:\s*([0-9a-fA-F]*)\s*$")
+        hexdump_re = re.compile(r"^\s+((?:[0-9a-fA-F]{2} ?){1,16})(?:\s{2,}|$)")
+        handle_re = re.compile(r"Handle: (0x[0-9a-fA-F]{4})")
+        cur_handle = None
+        pending = None  # [handle, nbytes, hex_chars]
+        # Blocking readline (daemon thread): select() on the buffered pipe
+        # misses lines already pulled into Python's buffer.
+        proc = self._btmon_proc
+        for raw in iter(proc.stdout.readline, b""):
             line = raw.decode("utf-8", errors="replace").rstrip()
 
-            # Voice button (ATVV): Data[1]: 08 = START_SEARCH; clone
-            # firmwares (UR02) retry with ff while waiting for MIC_OPEN.
-            if "Handle: 0x0042" in prev_line and (
-                "Data[1]: ff" in line or "Data[1]: 08" in line
-            ):
+            if pending is not None:
+                m = hexdump_re.match(line)
+                if m:
+                    pending[2] += m.group(1).replace(" ", "")
+                    if len(pending[2]) >= pending[1] * 2:
+                        self._dispatch_notification(
+                            pending[0], pending[2][: pending[1] * 2]
+                        )
+                        pending = None
+                    continue
+                # Payload ended early (unexpected format): use what we have.
+                if pending[2]:
+                    self._dispatch_notification(pending[0], pending[2])
+                pending = None
+
+            m = handle_re.search(line)
+            if m:
+                cur_handle = m.group(1).lower()
+                continue
+            m = data_re.search(line)
+            if m and cur_handle:
+                if m.group(2):
+                    self._dispatch_notification(cur_handle, m.group(2))
+                else:
+                    pending = [cur_handle, int(m.group(1)), ""]
+                continue
+            if line and not line.startswith(" "):
+                cur_handle = None  # new btmon packet
+
+    def _dispatch_notification(self, handle, hexdata):
+        """Act on one GATT notification payload from btmon."""
+        hexdata = hexdata.lower()
+        if handle == "0x0042":
+            # Voice button (ATVV): 08 = START_SEARCH; clone firmwares (UR02)
+            # retry with ff while waiting for MIC_OPEN.
+            if hexdata in ("ff", "08"):
                 if _KODI_AVAILABLE:
                     xbmc.log(
                         "Voice keyboard BLE: mic button detected via btmon",
                         xbmc.LOGINFO,
                     )
                 self._on_ble_voice_start()
-
-            # ATVV AUDIO_END / button release (0x00). Two interaction modes:
-            # - short press (<2s): keep listening until silence is detected
-            #   (ignore the release that immediately follows the press)
-            # - held >=2s: releasing the button is the stop signal
-            # The remote's own end-of-stream 0x00 also arrives well past 2s,
-            # so it stops the capture through the same path.
-            elif "Handle: 0x0042" in prev_line and "Data[1]: 00" in line:
+            # ATVV AUDIO_END / button release (0x00). Short press (<2s): keep
+            # listening until silence; held >=2s: release stops capture. The
+            # remote's own end-of-stream 00 also arrives past 2s.
+            # Push-to-talk: button release (00) ends the capture at once.
+            # A 00 within 0.35 s of the press is treated as firmware noise.
+            elif hexdata == "00":
                 backend = self._ble_backend
                 if backend is not None and getattr(backend, "_recording", False):
-                    if time.time() - self._last_activation_time >= 2.0:
+                    if time.time() - self._last_activation_time >= 0.35:
                         backend.signal_stream_end()
+                        if getattr(self, "_ble_control_char_path", None):
+                            try:
+                                from lib.audio_capture.ble import _send_mic_close
 
-            # Audio data: Handle 0x003f, Data[N]: hex
-            elif "Handle: 0x003f" in prev_line:
-                m = data_re.search(line)
-                if m:
-                    # If audio data arrives while idle, auto-trigger voice start.
-                    # This catches the case where the status ff notification was
-                    # too brief for btmon to output before it was replaced by 00.
-                    if self._get_state() == self._STATE_IDLE:
-                        if _KODI_AVAILABLE:
-                            xbmc.log(
-                                "Voice keyboard BLE: audio data triggered voice start",
-                                xbmc.LOGINFO,
-                            )
-                        self._on_ble_voice_start()
-
-                    if self._ble_backend:
-                        self._ble_backend.feed_audio_data(m.group(2))
-
-            prev_line = line
+                                _send_mic_close(self._ble_control_char_path)
+                            except Exception:
+                                pass
+        elif handle == "0x003f":
+            # Audio arriving while idle: the status notification was missed.
+            if self._get_state() == self._STATE_IDLE and time.time() >= getattr(
+                self, "_ignore_audio_until", 0
+            ):
+                if _KODI_AVAILABLE:
+                    xbmc.log(
+                        "Voice keyboard BLE: audio data triggered voice start",
+                        xbmc.LOGINFO,
+                    )
+                self._on_ble_voice_start()
+            if self._ble_backend:
+                self._ble_backend.feed_audio_data(hexdata)
 
     def run(self):
         """Main service loop. Polls for activation until Kodi requests abort."""
@@ -492,15 +633,22 @@ class VoiceService(object):
             # alongside the remote button via RunScript.
             if self._get_state() == self._STATE_IDLE:
                 if self._check_activation():
-                    if self._keyboard_visible():
+                    mode = "dictate" if self._keyboard_visible() else (
+                        "command" if self._commands_enabled() else None
+                    )
+                    if mode:
                         self._set_state(self._STATE_LISTENING)
-                        t = threading.Thread(target=self._worker)
+                        t = threading.Thread(target=self._worker, args=(mode,))
                         t.daemon = True
                         t.start()
             monitor.waitForAbort(0.5)
 
         if hasattr(self, "_btmon_proc") and self._btmon_proc:
             self._btmon_proc.terminate()
+            try:
+                self._btmon_proc.wait(timeout=2)
+            except Exception:
+                self._btmon_proc.kill()
         xbmc.log("Voice keyboard service stopped")
 
 

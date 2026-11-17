@@ -98,5 +98,11 @@ if __name__ == "__main__":
 
     if infos:
         start_info_actions(infos, params)
+    else:
+        # Launched from the add-ons menu (no skin request): Kodi routes this
+        # to the pluginsource, so an empty listing looked like "won't open"
+        # (Bingie shows nothing at all). Open settings instead.
+        xbmcplugin.endOfDirectory(handle, succeeded=False)
+        ADDON.openSettings()
 
 xbmc.log('finished')

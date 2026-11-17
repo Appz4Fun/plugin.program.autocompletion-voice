@@ -396,7 +396,11 @@ class BLEAudioCapture(AudioCaptureBase):
             open("/storage/.kodi/temp/voice_raw.hex", "w").close()
         except OSError:
             pass
-        self._silence_detector = SilenceDetector(sample_rate=BLE_SAMPLE_RATE)
+        # Push-to-talk: the capture ends when the button is released (remote
+        # sends AUDIO_END on the status char -> signal_stream_end), not on
+        # silence — silence detection either cut users off before they spoke
+        # or never fired with background chatter.
+        self._silence_detector = None
         self._stop_event.clear()
         self._last_packet_time = 0.0
         self._recording = True
