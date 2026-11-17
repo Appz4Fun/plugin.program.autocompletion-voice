@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<addon id="script.xbmc4lyfe.signalscope" name="SignalScope" version="0.0.1" provider-name="e2e stub">
+  <requires><import addon="xbmc.python" version="3.0.0"/></requires>
+  <extension point="xbmc.service" library="service.py"/>
+  <extension point="xbmc.python.script" library="main.py"><provides>executable</provides></extension>
+  <extension point="xbmc.addon.metadata"><summary lang="en_GB">stub</summary><platform>all</platform></extension>
+</addon>

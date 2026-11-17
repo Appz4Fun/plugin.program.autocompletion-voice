@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- e2e mock of Bingie's built-in search window (same id, same skin string) -->
+<window id="1109" type="window">
+  <defaultcontrol>1</defaultcontrol>
+  <controls>
+    <control type="button" id="1"><left>100</left><top>100</top><width>1700</width><height>80</height>
+      <label>Bingie search: $INFO[Skin.String(CustomSearchTerm)]</label></control>
+  </controls>
+</window>

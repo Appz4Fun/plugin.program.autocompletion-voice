@@ -27,6 +27,7 @@ class FakeKodi(object):
         self.paths = {}
         self.on_builtin = None
         self.on_rpc = None
+        self.window_id = 10000
 
     def setting(self, addon_id, key):
         return self.settings.get(addon_id, {}).get(key, "")
@@ -113,6 +114,8 @@ def install():
         def clearProperty(self, k):
             Window._props.pop(k, None)
 
+    xbmcgui.getCurrentWindowId = lambda: KODI.window_id
+    xbmcgui.getCurrentWindowDialogId = lambda: 9999
     xbmcgui.Dialog = Dialog
     xbmcgui.DialogProgressBG = DialogProgressBG
     xbmcgui.Window = Window

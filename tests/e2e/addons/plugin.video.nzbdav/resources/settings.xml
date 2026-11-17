@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<settings version="1"><section id="plugin.video.nzbdav"><category id="c" label="128"><group id="1">
+  <setting id="auto_select_best" type="boolean" label="128"><level>0</level><default>false</default><control type="toggle"/></setting>
+</group></category></section></settings>

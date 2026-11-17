@@ -132,6 +132,16 @@ class TestActions(Base):
         self.assertEqual(done, [])
         self.assertEqual(KODI.builtins, [])
 
+    def test_search_bingie_when_already_on_top(self):
+        KODI.window_id = 11109
+        self.run_plan({"action": "search", "query": "The Bear"})
+        self.assertEqual(KODI.builtins, ["BINGIE:The Bear"])
+
+    def test_search_from_fullscreen_backs_out_first(self):
+        KODI.cond["Window.IsVisible(fullscreenvideo)"] = True
+        self.run_plan({"action": "search", "query": "The Bear"})
+        self.assertEqual(KODI.builtins[:2], ["Action(Back)", "ActivateWindow(1109)"])
+
     def test_search_bingie_opens_window_and_sanitises(self):
         self.run_plan({"action": "search", "query": 'six feet "under")\\'})
         self.assertEqual(KODI.builtins[0], "ActivateWindow(1109)")
@@ -354,6 +364,39 @@ class TestBtmonAndPushToTalk(Base):
         self.assertEqual(self.events, [("0x0042", "08"),
                                        ("0x003f", "0102030405060708090a0b0c0d0e0f1011121314"),
                                        ("0x0042", "ff")])
+
+    def test_search_window_under_fullscreen_video_is_not_dictation(self):
+        import service
+        KODI.window_id = 12005  # fullscreen video on top, 1109 still open beneath
+        KODI.cond["Window.IsVisible(1109)"] = True
+        self.assertFalse(service.VoiceService()._keyboard_visible())
+        KODI.window_id = 11109
+        self.assertTrue(service.VoiceService()._keyboard_visible())
+
+    def test_capture_starts_on_press_before_worker(self):
+        import service, threading
+        svc = service.VoiceService()
+        started = []
+
+        class Backend(object):
+            _recording = False
+
+            def start_recording(s, external_feed=False):
+                started.append(threading.current_thread().name)
+                s._recording = True
+
+            def stop_recording(s):
+                s._recording = False
+                return b""
+
+        svc._ble_backend = Backend()
+        svc._keyboard_visible = lambda: False
+        svc._commands_enabled = lambda: False
+        main = threading.current_thread().name
+        svc._on_ble_voice_start()
+        time.sleep(0.2)
+        self.assertEqual(started, [main])           # in the btmon reader thread
+        self.assertFalse(svc._ble_backend._recording)  # discarded when ignored
 
     def test_release_stops_capture_immediately(self):
         svc = self.make_service()

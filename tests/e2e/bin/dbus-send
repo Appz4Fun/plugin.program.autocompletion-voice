@@ -1,0 +1,8 @@
+#!/bin/sh
+# Fake bluez writes: log every command; MIC_OPEN / MIC_CLOSE flip remote state.
+mkdir -p /tmp/remote
+echo "$(date +%s.%N) $*" >> /tmp/remote/dbus.log
+case "$*" in
+  *0x0c,0x00,0x01*) touch /tmp/remote/mic_open ;;
+  *0x0d,0x00*) touch /tmp/remote/mic_close ;;
+esac

@@ -242,11 +242,15 @@ def _search(query, set_search_term):
     if not query:
         return False
     if xbmc.getSkinDir() == "skin.bingie":
-        if not xbmc.getCondVisibility("Window.IsVisible(1109)"):
+        if xbmcgui.getCurrentWindowId() not in (1109, 11109):
+            # Leave fullscreen video first or the search opens behind it.
+            if xbmc.getCondVisibility("Window.IsVisible(fullscreenvideo)"):
+                xbmc.executebuiltin("Action(Back)")
+                xbmc.sleep(300)
             xbmc.executebuiltin("ActivateWindow(1109)")
             for _ in range(30):
                 xbmc.sleep(100)
-                if xbmc.getCondVisibility("Window.IsVisible(1109)"):
+                if xbmcgui.getCurrentWindowId() in (1109, 11109):
                     break
         set_search_term(query)
         return True

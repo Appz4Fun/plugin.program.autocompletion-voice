@@ -31,6 +31,17 @@ from lib.stt.gemini import GeminiSTTProvider  # noqa: F401 — pre-import for th
 DEBOUNCE_SECONDS = 0.5
 
 
+def bingie_search_on_top():
+    """True only when Bingie's custom search window (1109 -> 11109) is the
+    window the user is looking at."""
+    try:
+        return xbmcgui.getCurrentWindowId() in (1109, 11109) and not xbmc.getCondVisibility(
+            "Player.HasVideo + Window.IsVisible(fullscreenvideo)"
+        )
+    except Exception:
+        return False
+
+
 class VoiceService(object):
     """Polls for voice activation, captures audio, and injects transcribed text."""
 
@@ -74,9 +85,11 @@ class VoiceService(object):
         It has its own on-screen keyboard that writes to
         Skin.String(CustomSearchTerm) instead of using the virtual keyboard.
         """
-        return xbmc.getSkinDir() == "skin.bingie" and bool(
-            xbmc.getCondVisibility("Window.IsVisible(1109)")
-        )
+        # The search window stays open UNDER fullscreen video after playing
+        # something from it, and Window.IsVisible(1109) keeps returning True
+        # there — so require it to be the topmost window, with no dialog
+        # (e.g. the select dialog) over it.
+        return xbmc.getSkinDir() == "skin.bingie" and bingie_search_on_top()
 
     @staticmethod
     def _set_bingie_search(text):
@@ -164,7 +177,10 @@ class VoiceService(object):
                 # externally, so use external_feed=True to skip spawning
                 # a second btmon process.
                 if backend is self._ble_backend:
-                    backend.start_recording(external_feed=True)
+                    # Usually already capturing since the button press
+                    # (_on_ble_voice_start); only start if not.
+                    if not getattr(backend, "_recording", False):
+                        backend.start_recording(external_feed=True)
                 else:
                     backend.start_recording()
                 # BLE backend buffers asynchronously; wait for silence or timeout.
@@ -328,12 +344,22 @@ class VoiceService(object):
                 5000,
             )
         finally:
+            self._discard_capture()
             if progress is not None:
                 try:
                     progress.close()
                 except Exception:
                     pass
             self._set_state(self._STATE_IDLE)
+
+    def _discard_capture(self):
+        """Stop an early-started BLE capture that will not be used."""
+        backend = self._ble_backend
+        if backend is not None and getattr(backend, "_recording", False):
+            try:
+                backend.stop_recording()
+            except Exception:
+                pass
 
     def _send_ble_ack(self):
         """Send ack to control characteristic — fire-and-forget.
@@ -373,6 +399,15 @@ class VoiceService(object):
         # Set state immediately to prevent double-triggers
         self._set_state(self._STATE_LISTENING)
         self._last_activation_time = now
+        # Start buffering audio NOW, in this thread. The worker first makes
+        # Kodi API calls (window checks, settings, progress dialog) that can
+        # take seconds when Kodi is busy; audio arriving before capture
+        # started used to be dropped, clipping the first words.
+        if self._ble_backend is not None:
+            try:
+                self._ble_backend.start_recording(external_feed=True)
+            except Exception:
+                pass
 
         if _KODI_AVAILABLE:
             xbmc.log(
@@ -393,6 +428,7 @@ class VoiceService(object):
                 # Close the remote's mic (LED off) and ignore the rest of this
                 # stream instead of re-triggering on every audio packet.
                 self._ignore_audio_until = time.time() + 3.0
+                self._discard_capture()
                 if getattr(self, "_ble_control_char_path", None):
                     try:
                         from lib.audio_capture.ble import _send_mic_close

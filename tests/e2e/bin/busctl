@@ -1,0 +1,12 @@
+#!/bin/sh
+# Fake bluez for the e2e harness: one UR02 remote with the ATVV characteristics.
+D=/org/bluez/hci0/dev_A4_C1_38_9D_1E_3A/service003c
+case "$1" in
+  tree) printf '%s\n' /org/bluez /org/bluez/hci0 $D $D/char003d $D/char003e $D/char0041 $D/char0041/desc0043 ;;
+  get-property)
+    case "$3" in
+      */char003d) echo 's "ab5e0002-5a21-4f05-bc7d-af01f617b664"' ;;
+      */char003e) echo 's "ab5e0003-5a21-4f05-bc7d-af01f617b664"' ;;
+      */char0041) echo 's "ab5e0004-5a21-4f05-bc7d-af01f617b664"' ;;
+    esac ;;
+esac
